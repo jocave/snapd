@@ -30,11 +30,14 @@ import (
 
 type ZigbeeDongleInterfaceSuite struct {
 	testutil.BaseTest
-	iface            interfaces.Interface
-	zigbeeAccessSlot *interfaces.Slot
-	badInterfaceSlot *interfaces.Slot
-	plug             *interfaces.Plug
-	badInterfacePlug *interfaces.Plug
+	iface              interfaces.Interface
+	zigbeeAccessSlot   *interfaces.Slot
+	badInterfaceSlot   *interfaces.Slot
+	genericPlug        *interfaces.Plug
+	specificPlug       *interfaces.Plug
+	badOnlyVendorPlug  *interfaces.Plug
+	badOnlyProductPlug *interfaces.Plug
+	badInterfacePlug   *interfaces.Plug
 }
 
 var _ = Suite(&ZigbeeDongleInterfaceSuite{
@@ -49,13 +52,26 @@ slots:
         interface: zigbee-dongle
     bad-interface: other-interface
 plugs:
-    plug: zigbee-dongle
+    generic-plug: zigbee-dongle
+    specific-plug:
+        interface: zigbee-dongle
+        id-vendor: "1111"
+        id-product: "2222"
+    bad-only-vendor:
+        interface: zigbee-dongle
+        id-vendor: "1111"
+    bad-only-product:
+        interface: zigbee-dongle
+        id-product: "2222"
     bad-interface: other-interface
 `))
 	c.Assert(err, IsNil)
 	s.zigbeeAccessSlot = &interfaces.Slot{SlotInfo: info.Slots["zigbee-access"]}
 	s.badInterfaceSlot = &interfaces.Slot{SlotInfo: info.Slots["bad-interface"]}
-	s.plug = &interfaces.Plug{PlugInfo: info.Plugs["plug"]}
+	s.genericPlug = &interfaces.Plug{PlugInfo: info.Plugs["generic-plug"]}
+	s.specificPlug = &interfaces.Plug{PlugInfo: info.Plugs["specific-plug"]}
+	s.badOnlyVendorPlug = &interfaces.Plug{PlugInfo: info.Plugs["bad-only-vendor"]}
+	s.badOnlyProductPlug = &interfaces.Plug{PlugInfo: info.Plugs["bad-only-product"]}
 	s.badInterfacePlug = &interfaces.Plug{PlugInfo: info.Plugs["bad-interface"]}
 }
 
@@ -63,14 +79,29 @@ func (s *ZigbeeDongleInterfaceSuite) TestName(c *C) {
 	c.Assert(s.iface.Name(), Equals, "zigbee-dongle")
 }
 
-func (s *ZigbeeDongleInterfaceSuite) TestPermanentSlotSnippetUdevPermissions(c *C) {
-	expectedSlotSnippet := []byte(`
-IMPORT{builtin}="usb_id"
-SUBSYSTEM=="tty", SUBSYSTEMS=="usb", ATTRS{idProduct}=="0003", ATTRS{idVendor}=="10c4", SYMLINK+="zigbee/$env{ID_SERIAL}"
-`)
-	snippet, err := s.iface.PermanentSlotSnippet(s.zigbeeAccessSlot, interfaces.SecurityUDev)
+func (s *ZigbeeDongleInterfaceSuite) TestSanitizeGenericPlug(c *C) {
+	err := s.iface.SanitizePlug(s.genericPlug)
 	c.Assert(err, IsNil)
-	c.Assert(snippet, DeepEquals, expectedSlotSnippet)
+}
+
+func (s *ZigbeeDongleInterfaceSuite) TestSanitizeSpecificPlug(c *C) {
+	err := s.iface.SanitizePlug(s.specificPlug)
+	c.Assert(err, IsNil)
+}
+
+func (s *ZigbeeDongleInterfaceSuite) TestSanitizeBadOnlyVendorPlug(c *C) {
+	err := s.iface.SanitizePlug(s.badOnlyVendorPlug)
+	c.Assert(err, ErrorMatches, `id-vendor without id-product`)
+}
+
+func (s *ZigbeeDongleInterfaceSuite) TestSanitizeBadOnlyProductPlug(c *C) {
+	err := s.iface.SanitizePlug(s.badOnlyProductPlug)
+	c.Assert(err, ErrorMatches, `id-product without id-vendor`)
+}
+
+func (s *ZigbeeDongleInterfaceSuite) TestSanitizeBadInterfacePlug(c *C) {
+	c.Assert(func() { s.iface.SanitizePlug(s.badInterfacePlug) }, PanicMatches,
+		`plug is not of interface "zigbee-dongle"`)
 }
 
 func (s *ZigbeeDongleInterfaceSuite) TestPermanentSlotSnippetUnusedSecuritySystems(c *C) {
@@ -93,49 +124,95 @@ func (s *ZigbeeDongleInterfaceSuite) TestPermanentSlotSnippetUnusedSecuritySyste
 }
 
 func (s *ZigbeeDongleInterfaceSuite) TestConnectedSlotSnippetUnusedSecuritySystems(c *C) {
-	// No extra apparmor permissions for slot
-	snippet, err := s.iface.ConnectedSlotSnippet(s.plug, s.zigbeeAccessSlot, interfaces.SecurityAppArmor)
-	c.Assert(err, IsNil)
-	c.Assert(snippet, IsNil)
-	// No extra seccomp permissions for slot
-	snippet, err = s.iface.ConnectedSlotSnippet(s.plug, s.zigbeeAccessSlot, interfaces.SecuritySecComp)
-	c.Assert(err, IsNil)
-	c.Assert(snippet, IsNil)
-	// No extra dbus permissions for slot
-	snippet, err = s.iface.ConnectedSlotSnippet(s.plug, s.zigbeeAccessSlot, interfaces.SecurityDBus)
-	c.Assert(err, IsNil)
-	c.Assert(snippet, IsNil)
-	// No extra udev permissions for slot
-	snippet, err = s.iface.ConnectedSlotSnippet(s.plug, s.zigbeeAccessSlot, interfaces.SecurityUDev)
-	c.Assert(err, IsNil)
-	c.Assert(snippet, IsNil)
-	// Other security types are not recognized
-	snippet, err = s.iface.ConnectedSlotSnippet(s.plug, s.zigbeeAccessSlot, "foo")
-	c.Assert(err, ErrorMatches, `unknown security system`)
-	c.Assert(snippet, IsNil)
+	for _, plug := range []*interfaces.Plug{s.genericPlug, s.specificPlug} {
+		// No extra apparmor permissions for slot
+		snippet, err := s.iface.ConnectedSlotSnippet(plug, s.zigbeeAccessSlot, interfaces.SecurityAppArmor)
+		c.Assert(err, IsNil)
+		c.Assert(snippet, IsNil)
+		// No extra seccomp permissions for slot
+		snippet, err = s.iface.ConnectedSlotSnippet(plug, s.zigbeeAccessSlot, interfaces.SecuritySecComp)
+		c.Assert(err, IsNil)
+		c.Assert(snippet, IsNil)
+		// No extra dbus permissions for slot
+		snippet, err = s.iface.ConnectedSlotSnippet(plug, s.zigbeeAccessSlot, interfaces.SecurityDBus)
+		c.Assert(err, IsNil)
+		c.Assert(snippet, IsNil)
+		// No extra udev permissions for slot
+		snippet, err = s.iface.ConnectedSlotSnippet(plug, s.zigbeeAccessSlot, interfaces.SecurityUDev)
+		c.Assert(err, IsNil)
+		c.Assert(snippet, IsNil)
+		// No extra mount permissions
+		snippet, err = s.iface.ConnectedSlotSnippet(plug, s.zigbeeAccessSlot, interfaces.SecurityMount)
+		c.Assert(err, IsNil)
+		c.Assert(snippet, IsNil)
+		// Other security types are not recognized
+		snippet, err = s.iface.ConnectedSlotSnippet(plug, s.zigbeeAccessSlot, "foo")
+		c.Assert(err, ErrorMatches, `unknown security system`)
+		c.Assert(snippet, IsNil)
+	}
 }
 
 func (s *ZigbeeDongleInterfaceSuite) TestPermanentPlugSnippetUnusedSecuritySystems(c *C) {
-	// No extra apparmor permissions for plug
-	snippet, err := s.iface.PermanentPlugSnippet(s.plug, interfaces.SecurityAppArmor)
+	for _, plug := range []*interfaces.Plug{s.genericPlug, s.specificPlug} {
+		// No extra apparmor permissions for plug
+		snippet, err := s.iface.PermanentPlugSnippet(plug, interfaces.SecurityAppArmor)
+		c.Assert(err, IsNil)
+		c.Assert(snippet, IsNil)
+		// No extra seccomp permissions for plug
+		snippet, err = s.iface.PermanentPlugSnippet(plug, interfaces.SecuritySecComp)
+		c.Assert(err, IsNil)
+		c.Assert(snippet, IsNil)
+		// No extra dbus permissions for plug
+		snippet, err = s.iface.PermanentPlugSnippet(plug, interfaces.SecurityDBus)
+		c.Assert(err, IsNil)
+		c.Assert(snippet, IsNil)
+		// No extra udev permissions for plug
+		snippet, err = s.iface.PermanentPlugSnippet(plug, interfaces.SecurityUDev)
+		c.Assert(err, IsNil)
+		c.Assert(snippet, IsNil)
+		// no extra mount permissions
+		snippet, err = s.iface.PermanentPlugSnippet(plug, interfaces.SecurityMount)
+		c.Assert(err, IsNil)
+		c.Assert(snippet, IsNil)
+		// Other security types are not recognized
+		snippet, err = s.iface.PermanentPlugSnippet(plug, "foo")
+		c.Assert(err, ErrorMatches, `unknown security system`)
+		c.Assert(snippet, IsNil)
+	}
+}
+
+func (s *ZigbeeDongleInterfaceSuite) TestConnectedAppArmorSnippetForGenericPlug(c *C) {
+	expectedAppArmorSnippet := []byte(nil)
+
+	snippet, err := s.iface.ConnectedPlugSnippet(s.genericPlug, s.zigbeeAccessSlot, interfaces.SecurityAppArmor)
 	c.Assert(err, IsNil)
-	c.Assert(snippet, IsNil)
-	// No extra seccomp permissions for plug
-	snippet, err = s.iface.PermanentPlugSnippet(s.plug, interfaces.SecuritySecComp)
+	c.Assert(snippet, DeepEquals, expectedAppArmorSnippet, Commentf("\nexpected:\n%s\nfound:\n%s", expectedAppArmorSnippet, snippet))
+}
+
+func (s *ZigbeeDongleInterfaceSuite) TestConnectedUdevSnippetForGenericPlug(c *C) {
+	expectedUdevSnippet := []byte(`IMPORT{builtin}="usb_id"
+SUBSYSTEM=="tty", SUBSYSTEMS=="usb", ATTRS{idProduct}=="0003", ATTRS{idVendor}=="10c4", SYMLINK+="zigbee/$env{ID_SERIAL}"`)
+
+	snippet, err := s.iface.ConnectedPlugSnippet(s.genericPlug, s.zigbeeAccessSlot, interfaces.SecurityUDev)
 	c.Assert(err, IsNil)
-	c.Assert(snippet, IsNil)
-	// No extra dbus permissions for plug
-	snippet, err = s.iface.PermanentPlugSnippet(s.plug, interfaces.SecurityDBus)
+	c.Assert(snippet, DeepEquals, expectedUdevSnippet, Commentf("\nexpected: %s\nfound: %s", expectedUdevSnippet, snippet))
+}
+
+func (s *ZigbeeDongleInterfaceSuite) TestConnectedAppArmorSnippetForSpecificPlug(c *C) {
+	expectedAppArmorSnippet := []byte("/dev/** rw,\n")
+
+	snippet, err := s.iface.ConnectedPlugSnippet(s.specificPlug, s.zigbeeAccessSlot, interfaces.SecurityAppArmor)
 	c.Assert(err, IsNil)
-	c.Assert(snippet, IsNil)
-	// No extra udev permissions for plug
-	snippet, err = s.iface.PermanentPlugSnippet(s.plug, interfaces.SecurityUDev)
+	c.Assert(snippet, DeepEquals, expectedAppArmorSnippet, Commentf("\nexpected:\n%s\nfound:\n%s", expectedAppArmorSnippet, snippet))
+}
+
+func (s *ZigbeeDongleInterfaceSuite) TestConnectedUdevSnippetForSpecificPlug(c *C) {
+	expectedUdevSnippet := []byte(`IMPORT{builtin}="usb_id"
+SUBSYSTEM=="tty", SUBSYSTEMS=="usb", ATTRS{idProduct}=="1111", ATTRS{idVendor}=="2222", SYMLINK+="zigbee/$env{ID_SERIAL}", TAG+="snap_connecting_app"`)
+
+	snippet, err := s.iface.ConnectedPlugSnippet(s.specificPlug, s.zigbeeAccessSlot, interfaces.SecurityUDev)
 	c.Assert(err, IsNil)
-	c.Assert(snippet, IsNil)
-	// Other security types are not recognized
-	snippet, err = s.iface.PermanentPlugSnippet(s.plug, "foo")
-	c.Assert(err, ErrorMatches, `unknown security system`)
-	c.Assert(snippet, IsNil)
+	c.Assert(snippet, DeepEquals, expectedUdevSnippet, Commentf("\nexpected:\n%s\nfound:\n%s", expectedUdevSnippet, snippet))
 }
 
 func (s *ZigbeeDongleInterfaceSuite) TestAutoConnect(c *C) {

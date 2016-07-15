@@ -39,12 +39,19 @@ func (iface *ZigbeeDongleInterface) String() string {
 	return iface.Name()
 }
 
-var zigbeeDongleDevPath = "/dev/zigbee/*"
+var deviceSymlinkPath = "/dev/zigbee/*"
+var udevHeader = `IMPORT{builtin}="usb_id"`
+var udevEntryPattern = `SUBSYSTEM=="tty", SUBSYSTEMS=="usb", ATTRS{idProduct}=="%s", ATTRS{idVendor}=="%s", SYMLINK+="zigbee/$env{ID_SERIAL}"`
+var udevEntryTagPattern = `, TAG+="%s"`
 
-var zigbeeDonglePermanentSlotUdev = []byte(`
-IMPORT{builtin}="usb_id"
-SUBSYSTEM=="tty", SUBSYSTEMS=="usb", ATTRS{idProduct}=="0003", ATTRS{idVendor}=="10c4", SYMLINK+="zigbee/$env{ID_SERIAL}"
-`)
+type usbIds struct {
+	productID string
+	vendorID  string
+}
+
+var knownDevices = [1]usbIds{
+	usbIds{productID: "0003", vendorID: "10c4"},
+}
 
 // SanitizeSlot checks slot validity
 func (iface *ZigbeeDongleInterface) SanitizeSlot(slot *interfaces.Slot) error {
@@ -58,10 +65,8 @@ func (iface *ZigbeeDongleInterface) SanitizeSlot(slot *interfaces.Slot) error {
 // PermanentSlotSnippet - no permissions given to slot permanently
 func (iface *ZigbeeDongleInterface) PermanentSlotSnippet(slot *interfaces.Slot, securitySystem interfaces.SecuritySystem) ([]byte, error) {
 	switch securitySystem {
-	case interfaces.SecurityAppArmor, interfaces.SecuritySecComp, interfaces.SecurityDBus, interfaces.SecurityMount:
+	case interfaces.SecurityAppArmor, interfaces.SecuritySecComp, interfaces.SecurityDBus, interfaces.SecurityUDev, interfaces.SecurityMount:
 		return nil, nil
-	case interfaces.SecurityUDev:
-		return zigbeeDonglePermanentSlotUdev, nil
 	default:
 		return nil, interfaces.ErrUnknownSecurity
 	}
@@ -78,10 +83,29 @@ func (iface *ZigbeeDongleInterface) ConnectedSlotSnippet(plug *interfaces.Plug, 
 }
 
 // SanitizePlug checks plug validity
-func (iface *ZigbeeDongleInterface) SanitizePlug(slot *interfaces.Plug) error {
-	if iface.Name() != slot.Interface {
+func (iface *ZigbeeDongleInterface) SanitizePlug(plug *interfaces.Plug) error {
+	if iface.Name() != plug.Interface {
 		panic(fmt.Sprintf("plug is not of interface %q", iface))
 	}
+
+	// only accept if we have both or neither
+	idVendor, vOk := plug.Attrs["id-vendor"].(string)
+	idProduct, pOk := plug.Attrs["id-product"].(string)
+	hasVendor := true
+	if !vOk || idVendor == "" {
+		hasVendor = false
+	}
+	hasProduct := true
+	if !pOk || idProduct == "" {
+		hasProduct = false
+	}
+	if hasVendor && !hasProduct {
+		return fmt.Errorf("id-vendor without id-product")
+	}
+	if !hasVendor && hasProduct {
+		return fmt.Errorf("id-product without id-vendor")
+	}
+
 	return nil
 }
 
@@ -97,18 +121,42 @@ func (iface *ZigbeeDongleInterface) PermanentPlugSnippet(plug *interfaces.Plug, 
 
 // ConnectedPlugSnippet returns security snippet specific to the plug
 func (iface *ZigbeeDongleInterface) ConnectedPlugSnippet(plug *interfaces.Plug, slot *interfaces.Slot, securitySystem interfaces.SecuritySystem) ([]byte, error) {
+	hasAttributes := true
+	idVendor, vOk := plug.Attrs["id-vendor"].(string)
+	idProduct, pOk := plug.Attrs["id-product"].(string)
+	if !vOk || !pOk || idVendor == "" || idProduct == "" {
+		hasAttributes = false
+	}
+
 	switch securitySystem {
 	case interfaces.SecurityAppArmor:
+		if hasAttributes {
+			return []byte("/dev/** rw,\n"), nil
+		}
 		paths, err := iface.zigbeeDevPaths(slot)
 		if err != nil {
 			return nil, fmt.Errorf("cannot compute plug security snippet: %v", err)
 		}
-		var snippet bytes.Buffer
+		var aaSnippet bytes.Buffer
 		for _, path := range paths {
-			snippet.WriteString(fmt.Sprintf("%s rwk,\n", path))
+			aaSnippet.WriteString(fmt.Sprintf("%s rwk,\n", path))
 		}
-		return snippet.Bytes(), nil
-	case interfaces.SecuritySecComp, interfaces.SecurityDBus, interfaces.SecurityUDev, interfaces.SecurityMount:
+		return aaSnippet.Bytes(), nil
+	case interfaces.SecurityUDev:
+		var udevSnippet bytes.Buffer
+		udevSnippet.WriteString(udevHeader)
+		udevSnippet.WriteString("\n")
+		if hasAttributes {
+			udevSnippet.WriteString(fmt.Sprintf(udevEntryPattern, idVendor, idProduct))
+			udevSnippet.WriteString(fmt.Sprintf(udevEntryTagPattern, "snap_connecting_app"))
+			return udevSnippet.Bytes(), nil
+		}
+		// else
+		for _, device := range knownDevices {
+			udevSnippet.WriteString(fmt.Sprintf(udevEntryPattern, device.productID, device.vendorID))
+		}
+		return udevSnippet.Bytes(), nil
+	case interfaces.SecuritySecComp, interfaces.SecurityDBus, interfaces.SecurityMount:
 		return nil, nil
 	default:
 		return nil, interfaces.ErrUnknownSecurity
@@ -117,7 +165,7 @@ func (iface *ZigbeeDongleInterface) ConnectedPlugSnippet(plug *interfaces.Plug, 
 
 func (iface *ZigbeeDongleInterface) zigbeeDevPaths(slot *interfaces.Slot) ([]string, error) {
 	var devPaths []string
-	matches, globErr := filepath.Glob(zigbeeDongleDevPath)
+	matches, globErr := filepath.Glob(deviceSymlinkPath)
 	if globErr != nil {
 		return nil, globErr
 	}
