@@ -147,11 +147,14 @@ func (iface *ZigbeeDongleInterface) ConnectedPlugSnippet(plug *interfaces.Plug, 
 		udevSnippet.WriteString(udevHeader)
 		udevSnippet.WriteString("\n")
 		if hasAttributes {
-			udevSnippet.WriteString(fmt.Sprintf(udevEntryPattern, idVendor, idProduct))
-			udevSnippet.WriteString(fmt.Sprintf(udevEntryTagPattern, "snap_connecting_app"))
+			for appName := range plug.Apps {
+				udevSnippet.WriteString(fmt.Sprintf(udevEntryPattern, idVendor, idProduct))
+				tag := fmt.Sprintf("snap_%s_%s", plug.Snap.Name(), appName)
+				udevSnippet.WriteString(fmt.Sprintf(udevEntryTagPattern, tag))
+				udevSnippet.WriteString("\n")
+			}
 			return udevSnippet.Bytes(), nil
 		}
-		// else
 		for _, device := range knownDevices {
 			udevSnippet.WriteString(fmt.Sprintf(udevEntryPattern, device.productID, device.vendorID))
 		}
